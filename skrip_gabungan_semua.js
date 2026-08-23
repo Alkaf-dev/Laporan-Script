@@ -1335,14 +1335,26 @@ function bungkusFormulaAman_(formula) {
 }
 
 function sembunyikanErrorDiSheet_(sheet) {
-  // [v9.4] BATCH: 3x baca per sheet (nilai, rumus, merge) + 1 tulis per baris.
+  // [v9.5] LAZY READ: baca NILAI saja dulu; jika tidak ada sel ber-error,
+  // selesai tanpa getFormulas()/getMergedRanges()/penulisan sama sekali.
   const range = sheet.getDataRange();
   const lastRow = range.getLastRow(), lastCol = range.getLastColumn();
   if (lastRow < 1 || lastCol < 1) return { dibungkus: 0 };
   const values = range.getValues();
-  const formulas = range.getFormulas();
 
-  // Peta merge sekali untuk seluruh area: sel non-jangkar tidak boleh ditulis.
+  // Pra-scan murah: kumpulkan kandidat sel yang menampilkan error.
+  const kandidat = [];
+  for (let r = 0; r < lastRow; r++) {
+    const vals = values[r];
+    for (let c = 0; c < lastCol; c++) {
+      if (apakahNilaiErrorTampilan_(vals[c])) kandidat.push([r, c]);
+    }
+  }
+  if (!kandidat.length) return { dibungkus: 0 };
+
+  // Ada kandidat: baru baca rumus + peta merge sekali untuk seluruh area
+  // (sel non-jangkar merge tidak boleh ditulis).
+  const formulas = range.getFormulas();
   const nonJangkar = {};
   range.getMergedRanges().forEach(function (mr) {
     const r0 = mr.getRow(), c0 = mr.getColumn();
@@ -1356,19 +1368,18 @@ function sembunyikanErrorDiSheet_(sheet) {
   // Kumpulkan perubahan per baris.
   const barisUbah = {}; // r -> { ubah: {kolom: rumusBaru}, kolom: [kolom,...] }
   let total = 0;
-  for (let r = 1; r <= lastRow; r++) {
-    const vals = values[r - 1], frms = formulas[r - 1];
-    for (let c = 1; c <= lastCol; c++) {
-      const f = frms[c - 1];
-      if (!f || !apakahNilaiErrorTampilan_(vals[c - 1])) continue;
-      const baru = bungkusFormulaAman_(f);
-      if (!baru || nonJangkar[r + ',' + c]) continue;
-      const rec = barisUbah[r] || (barisUbah[r] = { ubah: {}, kolom: [] });
-      rec.ubah[c] = baru;
-      rec.kolom.push(c);
-      total++;
-    }
+  for (let i = 0; i < kandidat.length; i++) {
+    const r = kandidat[i][0] + 1, c = kandidat[i][1] + 1;
+    const f = formulas[r - 1][c - 1];
+    if (!f) continue;
+    const baru = bungkusFormulaAman_(f);
+    if (!baru || nonJangkar[r + ',' + c]) continue;
+    const rec = barisUbah[r] || (barisUbah[r] = { ubah: {}, kolom: [] });
+    rec.ubah[c] = baru;
+    rec.kolom.push(c);
+    total++;
   }
+  if (!total) return { dibungkus: 0 };
 
   // Tulis batch per baris: satu segmen berdempet yang memuat rumus baru +
   // padding aman (rumus asli / nilai beku). Segmen dipotong sebelum kolom
@@ -1433,8 +1444,8 @@ function jalankanSembunyikanErrorRumus() {
   try {
     const h = sembunyikanErrorRumusSemua();
     const pesan = h.total === 0
-      ? "Selesai. Tidak ada sel rumus yang sedang menampilkan error."
-      : "Selesai. " + h.total + " sel rumus error dibungkus IFERROR (tampil 0 / 0%):\n\n" + h.ringkas.join("\n");
+      ? "Selesai (v9.5). Tidak ada sel rumus yang sedang menampilkan error."
+      : "Selesai (v9.5). " + h.total + " sel rumus error dibungkus IFERROR (tampil 0 / 0%):\n\n" + h.ringkas.join("\n");
     SpreadsheetApp.getUi().alert(pesan);
   } catch (err) { SpreadsheetApp.getUi().alert("TERJADI ERROR:\n\n" + err.message); }
 }
@@ -1449,8 +1460,8 @@ function jalankanSembunyikanErrorRumusAktif() {
     }
     const h = sembunyikanErrorDiSheet_(sheet);
     SpreadsheetApp.getUi().alert(h.dibungkus === 0
-      ? 'Selesai. Tidak ada sel rumus yang sedang menampilkan error di sheet "' + sheet.getName() + '".'
-      : 'Selesai. ' + h.dibungkus + ' sel rumus error di sheet "' + sheet.getName() + '" dibungkus IFERROR (tampil 0 / 0%).');
+      ? 'Selesai (v9.5). Tidak ada sel rumus yang sedang menampilkan error di sheet "' + sheet.getName() + '".'
+      : 'Selesai (v9.5). ' + h.dibungkus + ' sel rumus error di sheet "' + sheet.getName() + '" dibungkus IFERROR (tampil 0 / 0%).');
   } catch (err) { SpreadsheetApp.getUi().alert("TERJADI ERROR:\n\n" + err.message); }
 }
 
