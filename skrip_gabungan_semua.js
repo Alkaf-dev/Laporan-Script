@@ -1230,13 +1230,29 @@ function writeToLaporan(sheetLaporan, results) {
 }
 
 // ============== PERBAIKI REFERENSI RUMUS RUSAK (#REF!) ==============
+// [v9.2] Auto-perbaikan HANYA untuk fungsi agregat variadic (SUM, AVERAGE,
+// COUNT, COUNTA, MAX, MIN) yang hasilnya tetap sah bila satu argumen dibuang.
+// Fungsi berargumen-posisi (VLOOKUP, IF, INDEX, dll.) TIDAK dibersihkan
+// otomatis, karena membuang argumen tengah menggeser argumen lain -> nilai
+// SALAH tanpa tanda error. Semua kasus lain jatuh ke jalur "cek manual".
+const FUNGSI_AMAN_REF = ["SUM", "AVERAGE", "COUNT", "COUNTA", "MAX", "MIN"];
+
 function buangReferensiRusakDariFormula(formula) {
-  if (formula.indexOf('#REF!') === -1) return null;
+  if (!/#ref!/i.test(formula)) return null;
+  // Kenali fungsi paling luar, mis. "=SUM(" atau "=ArrayFormula(sum("
+  const m = formula.match(/^=(?:ARRAYFORMULA\()?([A-Za-z][A-Za-z0-9_.]*)\(/i);
+  if (!m || FUNGSI_AMAN_REF.indexOf(m[1].toUpperCase()) === -1) return null;
   let hasil = formula;
-  hasil = hasil.replace(/;\s*#REF!/g, '').replace(/#REF!\s*;/g, '')
-               .replace(/,\s*#REF!/g, '').replace(/#REF!\s*,/g, '');
-  if (hasil.indexOf('#REF!') !== -1) return null;
+  hasil = hasil.replace(/;\s*#ref!/gi, '').replace(/#ref!\s*;/gi, '')
+               .replace(/,\s*#ref!/gi, '').replace(/#ref!\s*,/gi, '');
+  if (/#ref!/i.test(hasil)) return null;
   return hasil;
+}
+
+function tambahCatatanRef_(sel, teks) {
+  // [v9.2] Jangan menimpa catatan lama; catatan baru disisipkan DI ATASnya.
+  const lama = sel.getNote();
+  sel.setNote(lama ? teks + "\n---\n" + lama : teks);
 }
 
 function scanPerbaikiSheet(sheet) {
@@ -1252,8 +1268,8 @@ function scanPerbaikiSheet(sheet) {
     if (typeof val !== 'string' || val.indexOf('#REF!') === -1) continue;
     const sel = sheet.getRange(r + 1, c + 1);
     const bersih = buangReferensiRusakDariFormula(formula);
-    if (bersih) { sel.setFormula(bersih); sel.setNote("Diperbaiki: #REF! dibuang dari rumus.\n\nBahasa:\n" + formula); diperbaiki++; }
-    else { sel.setNote("#REF! tidak bisa dibuang otomatis, cek manual:\n" + formula); manual++; }
+    if (bersih) { sel.setFormula(bersih); tambahCatatanRef_(sel, "Diperbaiki: #REF! dibuang dari rumus.\n\nBahasa:\n" + formula); diperbaiki++; }
+    else { tambahCatatanRef_(sel, "#REF! tidak bisa dibuang otomatis (fungsi bukan agregat aman / pola tak dikenali), cek manual:\n" + formula); manual++; }
   }
   return { diperbaiki: diperbaiki, manual: manual };
 }
