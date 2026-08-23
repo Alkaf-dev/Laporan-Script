@@ -15,6 +15,11 @@
  * otomatis NONAKTIF bila berada di file Laporan, jadi tidak akan mengganggu
  * data/tampilan laporan sama sekali. Demi aman, jangan menjalankan fungsi
  * manual dari editor selain lewat menu yang tersedia di tiap file.
+ *
+ * [v9.1-GABUNGAN] Sisi Mutaba'ah kini memuat mesin audit nama lengkap dari
+ * skrip_mutabaah.js v9.1: menu 'Perbaiki Nama Santri (Audit Kelas)',
+ * auto-perbaikan nama di awal Sinkronisasi, penomoran robust batch (cepat),
+ * serta writeToLaporan anti-nomor-dobel + trim Grade di sisi Laporan.
  *************************************************************/
 
 /* Deteksi jenis file:
@@ -44,6 +49,8 @@ function onOpen() {
   ui.createMenu('🔄 Sinkronisasi Laporan')
     .addItem('Sync Sekarang (Semua Halaqah)', 'syncSemuaHalaqah')
     .addItem('Pasang Trigger Otomatis', 'pasangTriggerOtomatis')
+    .addSeparator()
+    .addItem('Perbaiki Nama Santri (Audit Kelas)', 'perbaikiNamaMutabaah')
     .addSeparator()
     .addItem('Samakan Nama Halaqah dgn Bulan Sebelumnya', 'samakanNamaHalaqah')
     .addToUi();
@@ -956,6 +963,124 @@ function samakanNamaHalaqah() {
   catch (e) { try { ss.toast(pesan, "Sinkronisasi Laporan", 15); } catch (e2) {} }
 }
 
+// ============== PERBAIKAN NAMA SANTRI (HASIL AUDIT KELAS) [v8/v9.1] ==============
+// Sheet KELAS di file Laporan = acuan ejaan. Struktur Mutaba'ah: 1 santri =
+// blok 3 baris mulai baris 5 (SYNC_CONFIG.DATA_START_ROW), nama di kolom B
+// baris pertama blok. Idempoten: nama sudah baku / baris sudah terhapus -> SKIP.
+const RENAME_MUTABAAH = [
+  ['Alkaf',   'Ibrohim bin Donald New',              'Ibrahim Bin Donald Arthur Muhammad'],
+  ['Munawar', 'Fathi Dzahabi.S',                     'Fathi Dzahabi S.'],
+  ['Farhan',  'Abdurrohman Afif',                    'Abdurrahman Afif'],
+  ['Azzam',   'Muhamad Bahtiar Almer Tajusa',        'Muhammad Bachtiar Almer Tajusa'],
+  ['Azzam',   'Achmad Fadhil Al zam',                'Achmad Fadhil Al Zam'],
+  ['Mundzir', 'Arqam Wadud Affandi',                 'Arqam Wadud'],
+  ['Mundzir', 'Muhammad Bin Donald Arthur Muhammad', 'Muhammad bin Donald'],
+  ['Adlan',   'Anfhal Zhafir Putra Alfi',            'Anfaal Zhafirputra Alfi'],
+  ['Daud',    'Muhammad Baariq Alfaqih Yusup',       'Muhamad Baariq Al Faqih Yusup']
+];
+const HAPUS_MUTABAAH = [
+  ['Ibrahim', 'Cholid'],
+  ['Farhan',  'Abdillah Arrafif'],
+  ['Adlan',   'Genta Lilo Abimanyu'],
+  ['Alwan',   'Ganendra Farzan Pratama']
+];
+const GANTI_TAB_MUTABAAH = [['Dani', 'Daud'], ['Nadzief', 'Nadzif']];
+
+function perbaikiNamaMutabaah(silent) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const log = [];
+  // 0) samakan nama TAB dengan file Laporan (prasyarat pairing sinkronisasi)
+  GANTI_TAB_MUTABAAH.forEach(function (p) {
+    const lama = ss.getSheetByName(p[0]);
+    const baru = ss.getSheetByName(p[1]);
+    if (!lama) { log.push('Tab "' + p[0] + '": ' + (baru ? 'sudah "' + p[1] + '" (SKIP)' : 'tidak ada (SKIP)')); return; }
+    if (baru) { log.push('Tab "' + p[1] + '" sudah ada - "' + p[0] + '" TIDAK diubah (cek manual!)'); return; }
+    lama.setName(p[1]);
+    log.push('Tab "' + p[0] + '" -> "' + p[1] + '" OK');
+  });
+  // 1) rename nilai nama santri
+  RENAME_MUTABAAH.forEach(function (it) {
+    const sh = ss.getSheetByName(it[0]);
+    if (!sh) { log.push(it[0] + ': sheet tidak ada!'); return; }
+    const r = cariBarisNamaMutabaah_(sh, it[1]);
+    if (!r) {
+      log.push(it[0] + ': "' + it[1] + '" -> ' + (cariBarisNamaMutabaah_(sh, it[2]) ? 'SKIP (sudah baku)' : 'TIDAK KETEMU!'));
+      return;
+    }
+    sh.getRange(r, SYNC_CONFIG.COL_NAMA).setValue(it[2]);
+    log.push(it[0] + ': "' + it[1] + '" -> "' + it[2] + '" OK');
+  });
+  // 2) hapus santri tak dikenal / duplikat (utuh 3 baris per blok)
+  HAPUS_MUTABAAH.forEach(function (it) {
+    const sh = ss.getSheetByName(it[0]);
+    if (!sh) { log.push(it[0] + ': sheet tidak ada!'); return; }
+    const r = cariBarisNamaMutabaah_(sh, it[1]);
+    if (!r) { log.push(it[0] + ': hapus "' + it[1] + '" SKIP'); return; }
+    const jml = Math.min(SYNC_CONFIG.ROWS_PER_STUDENT, sh.getMaxRows() - r + 1);
+    sh.deleteRows(r, jml);
+    rapikanNoMutabaah_(sh);
+    log.push(it[0] + ': hapus "' + it[1] + '" (' + jml + ' baris) OK');
+  });
+  // 3) [v9] rapikan kolom No SEMUA sheet halaqah (bukan hanya yang ada hapusan):
+  // menyembuhkan nomor dobel/lompat & nomor pada baris label tanpa menunggu hapus.
+  ss.getSheets().forEach(function (sh) {
+    if (isHalaqahSheet(sh)) rapikanNoMutabaah_(sh);
+  });
+  log.push('Penomoran semua sheet halaqah dirapikan (v9).');
+  Logger.log('PERBAIKAN NAMA MUTABAAH:\n' + log.join('\n'));
+  const pesan = log.length ? log.join('\n') : 'Tidak ada perubahan.';
+  try {
+    if (silent === true) ss.toast(pesan, 'Perbaikan Nama Santri', 10);
+    else SpreadsheetApp.getUi().alert('Hasil Perbaikan Nama Santri:\n\n' + pesan);
+  } catch (e) {}
+  return pesan;
+}
+
+function cariBarisNamaMutabaah_(sheet, nama) {
+  // [v9.1] Pindai tiap baris dengan SATU pembacaan batch kolom Nama:
+  // blok santri yang tidak rata kelipatan 3 tetap ketemu, tanpa ribuan
+  // panggilan API per sel (penyebab eksekusi lama di v9).
+  const last = Math.max(getBarisDataTerakhir(sheet), sheet.getLastRow());
+  const jml = last - SYNC_CONFIG.DATA_START_ROW + 1;
+  if (jml < 1) return 0;
+  const namaArr = sheet.getRange(SYNC_CONFIG.DATA_START_ROW, SYNC_CONFIG.COL_NAMA, jml, 1).getValues();
+  for (let i = 0; i < namaArr.length; i++) {
+    if (String(namaArr[i][0]).trim() === nama) return SYNC_CONFIG.DATA_START_ROW + i;
+  }
+  return 0;
+}
+
+function rapikanNoMutabaah_(sheet) {
+  // [v9.1] Pindai TIAP baris (bukan langkah 3): nomor dobel/lompat akibat blok
+  // yang bergeser hilang, dan nomor yang menempel di baris label
+  // (I Z I N / S A K I T / A L P A / T D K SETOR) ikut dikosongkan.
+  // Dikerjakan BATCH: 1x baca kolom No+Nama, maksimal 1x tulis kolom No,
+  // sehingga eksekusi hitungan detik (v9 per-sel membuatnya ber menit).
+  const last = Math.max(getBarisDataTerakhir(sheet), sheet.getLastRow());
+  const jml = last - SYNC_CONFIG.DATA_START_ROW + 1;
+  if (jml < 1) return;
+  const blok = sheet.getRange(SYNC_CONFIG.DATA_START_ROW, 1, jml, Math.max(2, SYNC_CONFIG.COL_NO, SYNC_CONFIG.COL_NAMA)).getValues();
+  let no = 0, adaPerubahan = false;
+  for (let i = 0; i < jml; i++) {
+    const nama = String(blok[i][SYNC_CONFIG.COL_NAMA - 1]).trim();
+    if (!nama) continue;
+    let target;
+    if (isNamaTidakValid(nama)) target = "";
+    else { no++; target = no; }
+    const sekarang = blok[i][SYNC_CONFIG.COL_NO - 1];
+    const sama = (sekarang === null || sekarang === undefined) ? (target === "") : String(sekarang) === String(target);
+    if (!sama) {
+      blok[i][SYNC_CONFIG.COL_NO - 1] = target;
+      adaPerubahan = true;
+    }
+  }
+  if (adaPerubahan) {
+    sheet.getRange(SYNC_CONFIG.DATA_START_ROW, SYNC_CONFIG.COL_NO, jml, 1).setValues(
+      blok.map(function (baris) { return [baris[SYNC_CONFIG.COL_NO - 1]]; })
+    );
+  }
+}
+
 // ============== SINKRONISASI KE MASTER LAPORAN ==============
 function cariFileLaporanBulanIni() {
   const fileIni = DriveApp.getFileById(SpreadsheetApp.getActiveSpreadsheet().getId());
@@ -974,6 +1099,9 @@ function cariFileLaporanBulanIni() {
 }
 
 function syncSemuaHalaqah() {
+  // [v9.1-gabungan] Bakukan nama santri dulu supaya yang terkirim ke Laporan
+  // identik dengan kelas (ejaan baku, jumlah baris benar).
+  try { perbaikiNamaMutabaah(true); } catch (e) { Logger.log('perbaikiNamaMutabaah gagal: ' + e); }
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const hasil = cariFileLaporanBulanIni();
   if (!hasil.file) { SpreadsheetApp.getUi().alert("File Laporan tidak ditemukan (cari: \"" + hasil.judulLaporan + "\")."); return; }
@@ -1083,9 +1211,12 @@ function writeToLaporan(sheetLaporan, results) {
 
   results.forEach(function (s, idx) {
     const r = startRow + idx;
-    sheetLaporan.getRange(r, C.NO).setValue(s.no);
+    // [v9.1-gabungan] Nomor dari posisi baris tujuan (idx+1), bukan nomor sumber,
+    // supaya sheet Laporan tidak mewarisi nomor dobel/lompat milik sumber.
+    sheetLaporan.getRange(r, C.NO).setValue(idx + 1);
     sheetLaporan.getRange(r, C.NAMA).setValue(s.nama);
-    sheetLaporan.getRange(r, C.GRADE).setValue(s.grade);
+    // [v9.1-gabungan] Trim nilai Grade agar varian ber-spasi seperti "C " tidak mengganggu rumus.
+    sheetLaporan.getRange(r, C.GRADE).setValue(String(s.grade == null ? '' : s.grade).trim());
     sheetLaporan.getRange(r, C.TARGET_BULANAN).setValue(s.targetBulanan);
     sheetLaporan.getRange(r, C.TARGET_TERCAPAI).setValue(s.targetTercapai);
     sheetLaporan.getRange(r, C.PRESENTASE).setValue(s.presentase);
