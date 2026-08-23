@@ -20,6 +20,13 @@
  * skrip_mutabaah.js v9.1: menu 'Perbaiki Nama Santri (Audit Kelas)',
  * auto-perbaikan nama di awal Sinkronisasi, penomoran robust batch (cepat),
  * serta writeToLaporan anti-nomor-dobel + trim Grade di sisi Laporan.
+ *
+ * [v9.2 - v9.5] Tersedia di KEDUA sisi file: auto-perbaiki #REF! aman-posisi
+ * (hanya fungsi agregat aman), menu 'Sembunyikan Error Rumus (#VALUE! dll.)
+ * jadi 0/0%' (IFERROR, #REF! dikecualikan) + varian Sheet Aktif Saja,
+ * tulis batch maks 1x setFormulas per baris (v9.4), dan lazy read (v9.5):
+ * sheet tanpa error dilewati tanpa baca rumus/merge. Alert hasil bertanda
+ * "(v9.5)".
  *************************************************************/
 
 /* Deteksi jenis file:
