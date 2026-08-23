@@ -42,6 +42,7 @@ function onOpen() {
     SpreadsheetApp.getUi().createMenu('Mutabaah')
       .addItem('Perbaiki Semua', 'perbaikiSemua')
       .addItem('Sembunyikan Error Rumus (#VALUE! dll.) jadi 0/0%', 'jalankanSembunyikanErrorRumus')
+      .addItem('Sembunyikan Error Rumus - Sheet Aktif Saja', 'jalankanSembunyikanErrorRumusAktif')
       .addToUi();
     return;
   }
@@ -1298,13 +1299,16 @@ function jalankanPerbaikiRefErrorManual() {
   } catch (err) { SpreadsheetApp.getUi().alert("TERJADI ERROR:\n\n" + err.message); }
 }
 
-// ============== SEMBUNYIKAN ERROR RUMUS (#VALUE! DLL.) [v9.3] ==============
+// ============== SEMBUNYIKAN ERROR RUMUS (#VALUE! DLL.) [v9.4-BATCH] ==============
 // Sel ber-rumus yang menampilkan teks error (#VALUE!, #DIV/0!, #N/A, #NUM!,
 // #NAME?, #NULL!) dibungkus IFERROR dengan fallback angka 0, sehingga tampilan
 // otomatis ikut format sel: kolom persen -> 0%, kolom angka -> 0. Idempoten:
 // rumus yang sudah dibungkus IFERROR dilewati. #REF! SENGAJA tidak disentuh di
 // sini - tetap lewat jalur 'Perbaiki Referensi Rumus Error' agar akar masalah
 // referensi terlihat dan bisa diperbaiki manual.
+// [v9.4] Dipercepat: nilai + rumus + peta merge dibaca SEKALI per sheet, lalu
+// penulisan dikemas menjadi MAKSIMAL SATU panggilan setFormulas per baris yang
+// berubah (dulu: 2-3 panggilan API per sel -> eksekusi menit-an).
 const DAFTAR_ERROR_TAMPILAN = ["#VALUE!", "#DIV/0!", "#N/A", "#NAME?", "#NUM!", "#NULL!", "#ERROR!", "#CYCLE?"];
 
 function apakahNilaiErrorTampilan_(v) {
@@ -1331,29 +1335,87 @@ function bungkusFormulaAman_(formula) {
 }
 
 function sembunyikanErrorDiSheet_(sheet) {
-  const lastRow = sheet.getLastRow(), lastCol = sheet.getLastColumn();
-  if (lastRow < 1 || lastCol < 1) return { dibungkus: 0, dilewati: 0 };
-  const values = sheet.getRange(1, 1, lastRow, lastCol).getValues();
-  const formulas = sheet.getRange(1, 1, lastRow, lastCol).getFormulas();
-  let dibungkus = 0, dilewati = 0;
-  for (let r = 0; r < lastRow; r++) {
-    for (let c = 0; c < lastCol; c++) {
-      const f = formulas[r][c];
-      if (!f) continue;
-      if (!apakahNilaiErrorTampilan_(values[r][c])) continue;
-      const baru = bungkusFormulaAman_(f);
-      if (!baru) { dilewati++; continue; }
-      // Jangan menulis ke sel merge yang bukan jangkar (menyebabkan error).
-      const sel = sheet.getRange(r + 1, c + 1);
-      if (sel.isPartOfMerge()) {
-        const mr = sel.getMergedRanges()[0];
-        if (mr && (mr.getRow() !== r + 1 || mr.getColumn() !== c + 1)) { dilewati++; continue; }
+  // [v9.4] BATCH: 3x baca per sheet (nilai, rumus, merge) + 1 tulis per baris.
+  const range = sheet.getDataRange();
+  const lastRow = range.getLastRow(), lastCol = range.getLastColumn();
+  if (lastRow < 1 || lastCol < 1) return { dibungkus: 0 };
+  const values = range.getValues();
+  const formulas = range.getFormulas();
+
+  // Peta merge sekali untuk seluruh area: sel non-jangkar tidak boleh ditulis.
+  const nonJangkar = {};
+  range.getMergedRanges().forEach(function (mr) {
+    const r0 = mr.getRow(), c0 = mr.getColumn();
+    for (let r = r0; r < r0 + mr.getNumRows(); r++) {
+      for (let c = c0; c < c0 + mr.getNumColumns(); c++) {
+        if (r !== r0 || c !== c0) nonJangkar[r + ',' + c] = true;
       }
-      sel.setFormula(baru);
-      dibungkus++;
+    }
+  });
+
+  // Kumpulkan perubahan per baris.
+  const barisUbah = {}; // r -> { ubah: {kolom: rumusBaru}, kolom: [kolom,...] }
+  let total = 0;
+  for (let r = 1; r <= lastRow; r++) {
+    const vals = values[r - 1], frms = formulas[r - 1];
+    for (let c = 1; c <= lastCol; c++) {
+      const f = frms[c - 1];
+      if (!f || !apakahNilaiErrorTampilan_(vals[c - 1])) continue;
+      const baru = bungkusFormulaAman_(f);
+      if (!baru || nonJangkar[r + ',' + c]) continue;
+      const rec = barisUbah[r] || (barisUbah[r] = { ubah: {}, kolom: [] });
+      rec.ubah[c] = baru;
+      rec.kolom.push(c);
+      total++;
     }
   }
-  return { dibungkus: dibungkus, dilewati: dilewati };
+
+  // Tulis batch per baris: satu segmen berdempet yang memuat rumus baru +
+  // padding aman (rumus asli / nilai beku). Segmen dipotong sebelum kolom
+  // ber-teks berisiko (=,+,-,@ tanpa rumus) supaya tidak tersentuh sama sekali.
+  Object.keys(barisUbah).forEach(function (k) {
+    const r = Number(k), rec = barisUbah[k];
+    const vals = values[r - 1], frms = formulas[r - 1];
+    const buf = [];
+    let segStart = -1;
+    const flush = function (endC) {
+      if (!buf.length) return;
+      sheet.getRange(r, segStart, 1, endC - segStart + 1).setFormulas([buf]);
+      buf.length = 0;
+    };
+    const minC = rec.kolom[0], maxC = rec.kolom[rec.kolom.length - 1];
+    for (let c = minC; c <= maxC; c++) {
+      if (rec.ubah[c]) {
+        if (segStart === -1) segStart = c;
+        buf.push(rec.ubah[c]);
+        continue;
+      }
+      if (segStart === -1) continue;
+      const fAsli = frms[c - 1];
+      if (fAsli) { buf.push(fAsli); continue; }
+      if (bisakahDibekukan_(vals[c - 1])) { buf.push(bekukanNilai_(vals[c - 1])); continue; }
+      flush(c - 1);
+      segStart = -1;
+    }
+    flush(maxC);
+  });
+  return { dibungkus: total };
+}
+
+function bisakahDibekukan_(v) {
+  return !(typeof v === 'string' && /^[=+@-]/.test(v));
+}
+
+function bekukanNilai_(v) {
+  // Pad dalam pengiriman batch: sel tanpa rumus dikirim ulang sebagai literal
+  // agar isinya tidak berubah; string kosong = sel kosong (aman).
+  if (v === null || v === undefined || v === '') return '';
+  if (typeof v === 'number') return String(v).replace('.', ',');
+  if (typeof v === 'boolean') return v ? 'TRUE' : 'FALSE';
+  if (Object.prototype.toString.call(v) === '[object Date]') {
+    try { return Utilities.formatDate(v, Session.getScriptTimeZone(), 'dd/MM/yyyy'); } catch (e) { return ''; }
+  }
+  return String(v);
 }
 
 function sembunyikanErrorRumusSemua() {
@@ -1374,6 +1436,21 @@ function jalankanSembunyikanErrorRumus() {
       ? "Selesai. Tidak ada sel rumus yang sedang menampilkan error."
       : "Selesai. " + h.total + " sel rumus error dibungkus IFERROR (tampil 0 / 0%):\n\n" + h.ringkas.join("\n");
     SpreadsheetApp.getUi().alert(pesan);
+  } catch (err) { SpreadsheetApp.getUi().alert("TERJADI ERROR:\n\n" + err.message); }
+}
+
+function jalankanSembunyikanErrorRumusAktif() {
+  // [v9.4] Perbaikan cepat untuk SATU sheet aktif saja.
+  try {
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+    if (EXCLUDED_SHEETS.indexOf(sheet.getName()) !== -1) {
+      SpreadsheetApp.getUi().alert('Sheet "' + sheet.getName() + '" dikecualikan dari pemindaian.');
+      return;
+    }
+    const h = sembunyikanErrorDiSheet_(sheet);
+    SpreadsheetApp.getUi().alert(h.dibungkus === 0
+      ? 'Selesai. Tidak ada sel rumus yang sedang menampilkan error di sheet "' + sheet.getName() + '".'
+      : 'Selesai. ' + h.dibungkus + ' sel rumus error di sheet "' + sheet.getName() + '" dibungkus IFERROR (tampil 0 / 0%).');
   } catch (err) { SpreadsheetApp.getUi().alert("TERJADI ERROR:\n\n" + err.message); }
 }
 
