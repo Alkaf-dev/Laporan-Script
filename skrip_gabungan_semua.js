@@ -41,6 +41,7 @@ function onOpen() {
     // ----- Menu untuk file LAPORAN -----
     SpreadsheetApp.getUi().createMenu('Mutabaah')
       .addItem('Perbaiki Semua', 'perbaikiSemua')
+      .addItem('Sembunyikan Error Rumus (#VALUE! dll.) jadi 0/0%', 'jalankanSembunyikanErrorRumus')
       .addToUi();
     return;
   }
@@ -68,6 +69,8 @@ function onOpen() {
     .addItem('Aktifkan Pembersihan Otomatis Tiap 5 Menit', 'pasangJadwalSapuBersihOtomatis')
     .addSeparator()
     .addItem('Perbaiki Referensi Rumus Error (#REF!) Sekarang', 'jalankanPerbaikiRefErrorManual')
+    .addSeparator()
+    .addItem('Sembunyikan Error Rumus (#VALUE! dll.) jadi 0/0%', 'jalankanSembunyikanErrorRumus')
     .addSeparator()
     .addItem('🧹 Hapus Semua Rentang Dilindungi', 'jalankanHapusSemuaProteksi')
     .addSeparator()
@@ -1291,6 +1294,85 @@ function jalankanPerbaikiRefErrorManual() {
     let pesan = "Selesai.\n";
     if (h.diperbaiki > 0) pesan += h.diperbaiki + " rumus diperbaiki.\n";
     if (h.manual > 0) pesan += h.manual + " rumus perlu dicek manual.\n";
+    SpreadsheetApp.getUi().alert(pesan);
+  } catch (err) { SpreadsheetApp.getUi().alert("TERJADI ERROR:\n\n" + err.message); }
+}
+
+// ============== SEMBUNYIKAN ERROR RUMUS (#VALUE! DLL.) [v9.3] ==============
+// Sel ber-rumus yang menampilkan teks error (#VALUE!, #DIV/0!, #N/A, #NUM!,
+// #NAME?, #NULL!) dibungkus IFERROR dengan fallback angka 0, sehingga tampilan
+// otomatis ikut format sel: kolom persen -> 0%, kolom angka -> 0. Idempoten:
+// rumus yang sudah dibungkus IFERROR dilewati. #REF! SENGAJA tidak disentuh di
+// sini - tetap lewat jalur 'Perbaiki Referensi Rumus Error' agar akar masalah
+// referensi terlihat dan bisa diperbaiki manual.
+const DAFTAR_ERROR_TAMPILAN = ["#VALUE!", "#DIV/0!", "#N/A", "#NAME?", "#NUM!", "#NULL!", "#ERROR!", "#CYCLE?"];
+
+function apakahNilaiErrorTampilan_(v) {
+  if (typeof v !== 'string') return false;
+  const t = v.trim().toUpperCase();
+  if (t.charAt(0) !== '#') return false;
+  for (let i = 0; i < DAFTAR_ERROR_TAMPILAN.length; i++) {
+    if (t.indexOf(DAFTAR_ERROR_TAMPILAN[i]) !== -1) return true;
+  }
+  return false;
+}
+
+function bungkusFormulaAman_(formula) {
+  // Return rumus baru, atau null bila sudah aman / tak layak dibungkus.
+  const isi = String(formula).replace(/^\s*=/, '');
+  if (/^\s*(?:ARRAYFORMULA\s*\(\s*)?IFERROR\s*\(/i.test(isi)) return null;
+  const pemisah = isi.indexOf(';') !== -1 ? ';' : (isi.indexOf(',') !== -1 ? ',' : ';');
+  if (/^\s*ARRAYFORMULA\s*\(/i.test(isi)) {
+    // Bungkus DI DALAM array supaya elemen array lain tidak ikut hilang.
+    const dalam = isi.replace(/^\s*ARRAYFORMULA\s*\(/i, '').replace(/\)\s*$/, '');
+    return '=ARRAYFORMULA(IFERROR(' + dalam + pemisah + '0))';
+  }
+  return '=IFERROR(' + isi + pemisah + '0)';
+}
+
+function sembunyikanErrorDiSheet_(sheet) {
+  const lastRow = sheet.getLastRow(), lastCol = sheet.getLastColumn();
+  if (lastRow < 1 || lastCol < 1) return { dibungkus: 0, dilewati: 0 };
+  const values = sheet.getRange(1, 1, lastRow, lastCol).getValues();
+  const formulas = sheet.getRange(1, 1, lastRow, lastCol).getFormulas();
+  let dibungkus = 0, dilewati = 0;
+  for (let r = 0; r < lastRow; r++) {
+    for (let c = 0; c < lastCol; c++) {
+      const f = formulas[r][c];
+      if (!f) continue;
+      if (!apakahNilaiErrorTampilan_(values[r][c])) continue;
+      const baru = bungkusFormulaAman_(f);
+      if (!baru) { dilewati++; continue; }
+      // Jangan menulis ke sel merge yang bukan jangkar (menyebabkan error).
+      const sel = sheet.getRange(r + 1, c + 1);
+      if (sel.isPartOfMerge()) {
+        const mr = sel.getMergedRanges()[0];
+        if (mr && (mr.getRow() !== r + 1 || mr.getColumn() !== c + 1)) { dilewati++; continue; }
+      }
+      sel.setFormula(baru);
+      dibungkus++;
+    }
+  }
+  return { dibungkus: dibungkus, dilewati: dilewati };
+}
+
+function sembunyikanErrorRumusSemua() {
+  let total = 0;
+  const ringkas = [];
+  SpreadsheetApp.getActiveSpreadsheet().getSheets().forEach(function (sh) {
+    if (EXCLUDED_SHEETS.indexOf(sh.getName()) !== -1) return;
+    const h = sembunyikanErrorDiSheet_(sh);
+    if (h.dibungkus) { total += h.dibungkus; ringkas.push(sh.getName() + ': ' + h.dibungkus + ' sel'); }
+  });
+  return { total: total, ringkas: ringkas };
+}
+
+function jalankanSembunyikanErrorRumus() {
+  try {
+    const h = sembunyikanErrorRumusSemua();
+    const pesan = h.total === 0
+      ? "Selesai. Tidak ada sel rumus yang sedang menampilkan error."
+      : "Selesai. " + h.total + " sel rumus error dibungkus IFERROR (tampil 0 / 0%):\n\n" + h.ringkas.join("\n");
     SpreadsheetApp.getUi().alert(pesan);
   } catch (err) { SpreadsheetApp.getUi().alert("TERJADI ERROR:\n\n" + err.message); }
 }
